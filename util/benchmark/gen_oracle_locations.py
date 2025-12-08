@@ -350,7 +350,8 @@ def extract_module_from_patch(instance, repo_dir, max_edit_file_num=1,
 def generate_oracle_locations_for_dataset(dataset, split,
                                      output_dir='evaluation/gt_location',
                                      repo_base_dir='playground',
-                                     selected_list=None):
+                                     selected_list=None,
+                                     max_edit_file_num=1):
     bench_data = load_dataset(dataset, split=split)
     # current_date = datetime.now().strftime('%Y-%m-%d')
     # output_file = f'evaluation/gt_data/SWE-bench_Lite/gt_modules_data_{current_date}.jsonl',
@@ -374,7 +375,7 @@ def generate_oracle_locations_for_dataset(dataset, split,
             repo_dir = setup_repo(instance_data=instance, repo_base_dir=repo_base_dir,
                                 dataset=dataset, split=split)
         
-            file_changes = extract_module_from_patch(instance, repo_dir)
+            file_changes = extract_module_from_patch(instance, repo_dir, max_edit_file_num)
             if not file_changes:
                 empty_edit_list.append(instance['instance_id'])
                 # continue
@@ -396,7 +397,7 @@ def generate_oracle_locations_for_dataset(dataset, split,
         except FileNotFoundError as e:
             logging.info(e)
             error_list.append(instance['instance_id'])
-            break
+            # break
     print(empty_edit_list)
     print(error_list)
     return output_file
@@ -535,13 +536,17 @@ if __name__ == "__main__":
     
     if args.dataset == 'princeton-nlp/SWE-bench_Lite' and args.split == 'test':
         generate_oracle_locations_for_dataset(args.dataset, args.split, 
-                                              args.output_dir, args.repo_base_dir)
+                                              args.output_dir, args.repo_base_dir, None, args.max_edit_file_num)
     elif args.dataset == 'princeton-nlp/SWE-bench' and args.split == 'train':
         with open(args.selected_list_file, 'r') as f:
             selected_list = json.loads(f.read())
         generate_oracle_locations_for_dataset(args.dataset, args.split, 
                                               args.output_dir, args.repo_base_dir, 
-                                              selected_list)
+                                              selected_list, args.max_edit_file_num)
+    elif args.dataset == "SWE-Gym/SWE-Gym":
+        generate_oracle_locations_for_dataset(args.dataset, args.split, 
+                                              args.output_dir, args.repo_base_dir, None, args.max_edit_file_num)
+
         
     if args.loc_bench:
         generate_oracle_locations_for_data_file(args.dataset, args.gen_n_limit,

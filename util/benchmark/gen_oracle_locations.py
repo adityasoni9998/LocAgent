@@ -331,9 +331,16 @@ def extract_module_from_patch(instance, repo_dir, max_edit_file_num=1,
                     _changes[_mode].append(f'{file}:{c.split(':')[-1].strip()}')
                 
                 if c.startswith("function:") and '.' in c:
-                    _c = c.split(':')[-1].strip().split('.')[0]
-                    if f'{file}:{_c.strip()}' not in _changes[mode]:
-                        _changes[mode].append(f'{file}:{_c.strip()}')
+                    _c = c.split(':')[-1].strip().split('.')[0]  # class name
+                    class_entry = f'{file}:{_c.strip()}'
+                    # Check if class existed in old file - if so, it's edited, not added
+                    class_existed = any(cls['name'] == _c.strip() for cls in old_file_structure['classes'])
+                    if class_existed:
+                        if class_entry not in _changes['edited_modules']:
+                            _changes['edited_modules'].append(class_entry)
+                    else:
+                        if class_entry not in _changes['added_modules']:
+                            _changes['added_modules'].append(class_entry)
                 else:
                     if f'{file}:{c.split(':')[-1].strip()}' not in _changes[mode]:
                         _changes[mode].append(f'{file}:{c.split(':')[-1].strip()}')

@@ -68,7 +68,7 @@ def check_moduel_existed(module, file_structure):
 
 # def get_module_from_line_number_with_file_structure(line, file_structure, include_class=False, merge_init=True):
 def get_module_from_line_number_with_file_structure(line, file_structure, 
-                                                    include_class=False, 
+                                                    include_class=True, 
                                                     merge_init=False
                                                     ):
     s = file_structure

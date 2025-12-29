@@ -8,26 +8,38 @@ import logging
 
 
 def parse_class_docstrings(target_file: str) -> list:
+    """Parse docstrings from classes AND functions/methods."""
     with open(target_file, 'r') as f:
         source_code = f.read()
         
     # Parse the code string
-    parsed_code = ast.parse(source_code)
+    try:
+        parsed_code = ast.parse(source_code)
+    except SyntaxError:
+        return []
+    
     docstring_nodes = []
-    # Iterate through nodes to find the class definition
+    # Iterate through nodes to find class and function definitions
     for node in ast.walk(parsed_code):
-        if isinstance(node, ast.ClassDef):
-            # Retrieve the class docstring
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Retrieve the docstring
             docstring = ast.get_docstring(node)
             if docstring:
                 # Find the start and end lines of the docstring
-                start_line = node.body[0].lineno  # First node under the class is usually the docstring
-                end_line = start_line + len(docstring.splitlines()) - 1
-                docstring_nodes.append({
-                    'start_line': start_line,
-                    'end_line': end_line,
-                    'content': docstring
-                })
+                # The docstring is the first statement in the body
+                if node.body and isinstance(node.body[0], ast.Expr):
+                    docstring_node = node.body[0]
+                    start_line = docstring_node.lineno
+                    # Prefer end_lineno if available, otherwise fall back to counting lines
+                    if hasattr(docstring_node, 'end_lineno') and docstring_node.end_lineno is not None:
+                        end_line = docstring_node.end_lineno
+                    else:
+                        end_line = start_line + len(docstring.splitlines()) - 1
+                    docstring_nodes.append({
+                        'start_line': start_line,
+                        'end_line': end_line,
+                        'content': docstring
+                    })
     return docstring_nodes
 
 

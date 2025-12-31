@@ -107,6 +107,8 @@ def apply_patch_str(patch, apply_file_path, hunk_size):
 
     # Apply the patch using
     try:
+        # print(patch)
+        # print("*"*100)
         result = subprocess.run(
             ['patch', '-p1', '-i', temp_patch_file_path, apply_file_path],
             check=True,
@@ -133,7 +135,7 @@ def apply_patch_str(patch, apply_file_path, hunk_size):
         # logging.debug('offsets', offsets)
         return (True, offsets)
     except subprocess.CalledProcessError as e:
-        # logging.warning(f"Error applying patch: {e.stderr}")
+        print(f"Error applying patch {patch}: {e.stderr}{e.stdout}")
         return (False, [])
     finally:
         # Clean up the temporary file
@@ -195,35 +197,75 @@ def group_patch_by_file(patch):
 
     return {file: "".join(hunks) for file, hunks in patch_by_file.items()}
 
+def group_patch_by_file2(patch):
+    """
+    Groups a patch string by file.
+
+    Args:
+        patch (str): The patch content as a string.
+
+    Returns:
+        dict: A dictionary where the keys are file paths, and the values are the corresponding patch content.
+    """
+    patch_by_file = defaultdict(list)
+    patch_lines = patch.splitlines()
+
+    current_file = None
+    file_header_pattern = r"^(---) (.+)"
+
+    for line in patch_lines:
+        match = re.match(file_header_pattern, line)
+        if match:
+            current_file = re.sub(r"^(a/)", "", match.group(2))
+            patch_by_file[current_file].append(f"{line}\n")
+        else:
+            if current_file:
+                if line.startswith("diff --git"):
+                    current_file = None
+                    continue
+                patch_by_file[current_file].append(f"{line}\n")
+
+    return {file: "".join(hunks) for file, hunks in patch_by_file.items() if file != '/dev/null'}    
 
 def extract_module_from_patch(instance, repo_dir, max_edit_file_num=1,
                               logger=None, 
                               include_gvar=False,
-                              rank=0):
-    edit_files = get_oracle_filenames(instance['patch'])
+                              rank=0, swe_smith=False,
+                              ignore_pr_with_file_add_remove=True):
+    edit_files = get_oracle_filenames(instance['patch'], ignore_pr_with_file_add_remove=ignore_pr_with_file_add_remove)
     # print(len(edit_files))
     
     # filter python files and limit the number of files
     filtered_edit_files = []
+    # NOTE: Ignores all non-python files edited by the PR (IMPORTANT)
     for fle in edit_files:
         if fle.endswith('.py'):
             filtered_edit_files.append(fle)
-    if not filtered_edit_files: return None
+    if len(filtered_edit_files) == 0:
+        return None
+
+    # NOTE: What should be max_edit_file_num for our case?
     if len(filtered_edit_files) > max_edit_file_num:
         return None
     
     file_changes = parse_patch(instance['patch'])
     # Group the patch by file
-    patch_by_file = group_patch_by_file(instance['patch'])
-    
+    patch_by_file = group_patch_by_file2(instance['patch'])
+
     updated_file_changes = []
     for file_change in file_changes:
-        file = file_change['file']
+        files = file_change['file']
+        file = files[0]
         if not file.endswith('.py'): continue
         target_file_path = os.path.join(repo_dir, file)
+        if not os.path.exists(target_file_path):
+            print(f"Rank {rank}: Source file {target_file_path} does not exist.")
+            return None
         
         # initial file structure
         class_info, function_names, file_lines = parse_python_file(target_file_path)
+        if file_lines is None:
+            return None
         old_file_structure = {
             "classes": class_info,
             "functions": function_names,
@@ -237,39 +279,79 @@ def extract_module_from_patch(instance, repo_dir, max_edit_file_num=1,
         # Extract the partial patch for this file
         partial_patch = patch_by_file.get(file)
         if not partial_patch:
-            # logging.warning(f"No patch found for {file}")
-            continue
+            print(f"No patch found for {file}")
+            return None
         
         # Apply the patch
+        new_file_path = os.path.join(repo_dir, files[1])
         success, offsets = apply_patch_str(partial_patch, target_file_path, len(file_change['hunks']))
         if not success:
             # TODO: assert
+            print(f"Rank {rank}: Failed to apply patch to {target_file_path}")
             return None
         
-        # new file structure
+        # handle renames
+        if files[1] != files[0]:
+            if os.path.exists(new_file_path):
+                target_file_path = new_file_path
+            else:
+                new_file_path = target_file_path
+        if not os.path.exists(target_file_path):
+            print(f"Rank {rank}: Patched file {new_file_path} does not exist after applying patch.")
+            return None
+
         class_info, function_names, file_lines = parse_python_file(target_file_path)
+        if file_lines is None:
+            return None
         new_file_structure = {
             "classes": class_info,
             "functions": function_names,
             "text": file_lines,
         }
-        new_global_vars = parse_global_var_from_file(target_file_path)
-        new_import_nodes = parse_import_nodes(target_file_path)
-        new_comment_nodes = parse_comment_nodes(target_file_path)
-        new_docstring_nodes = parse_class_docstrings(target_file_path)
+        new_global_vars = parse_global_var_from_file(new_file_path)
+        new_import_nodes = parse_import_nodes(new_file_path)
+        new_comment_nodes = parse_comment_nodes(new_file_path)
+        new_docstring_nodes = parse_class_docstrings(new_file_path)
         
         changes = collections.defaultdict(list)
+        found_non_trivial_change = False
+        
+        # For SWE-Smith: base_commit is already fixed, patch introduces bugs.
+        # After applying patch: post-patch = buggy, pre-patch = fixed.
+        # We want buggy → fixed, so we swap old/new interpretations:
+        # - Post-patch (buggy) becomes "old", pre-patch (fixed) becomes "new"
+        # - patch's `add` lines are in buggy code (to be deleted in fix)
+        # - patch's `delete` lines are in fixed code (to be added by fix)
+        if swe_smith:
+            # Swap: use post-patch as old (buggy), pre-patch as new (fixed)
+            # This means: old_* vars hold buggy state, new_* vars hold fixed state
+            # But we parsed old_* from pre-patch and new_* from post-patch
+            # So we swap them:
+            old_file_structure, new_file_structure = new_file_structure, old_file_structure
+            old_global_vars, new_global_vars = new_global_vars, old_global_vars
+            old_import_nodes, new_import_nodes = new_import_nodes, old_import_nodes
+            old_comment_nodes, new_comment_nodes = new_comment_nodes, old_comment_nodes
+            old_docstring_nodes, new_docstring_nodes = new_docstring_nodes, old_docstring_nodes
+            file = files[1] # in case of renames use the target file name which is the pre-bug-fix code in SWE-smith
         for i, hunk in enumerate(file_change['hunks']):
             # if i == len(offsets): offsets.append(0) # align with hunk size
             
             # process edited lines
             delete_change = hunk['changes']['delete']
             add_change = hunk['changes']['add']
+            
+            # For SWE-Smith: swap delete/add since we swapped old/new
+            # - Original delete (fixed code lines) → now represents "add" (added by fix)
+            # - Original add (buggy code lines) → now represents "delete" (removed by fix)
+            if swe_smith:
+                delete_change, add_change = add_change, delete_change
             # deleted_lines, added_lines = [], []
             
             for delete in delete_change:
                 line = delete['line'] + offsets[i]
                 # is_comment(line, old_comment_nodes) or \
+                if is_import_statement(line, old_import_nodes):
+                    found_non_trivial_change = True
                 if is_import_statement(line, old_import_nodes) or \
                     delete['content'].strip().startswith('#') or \
                     is_docstring(line, old_docstring_nodes):
@@ -278,12 +360,14 @@ def extract_module_from_patch(instance, repo_dir, max_edit_file_num=1,
                 # check is global var
                 variable = is_global_var(line, old_global_vars)
                 if variable:
+                    found_non_trivial_change = True
                     if include_gvar and variable not in changes['edited_modules']:
                         changes['edited_modules'].append(f'variable: {variable}')
                     continue
                 
                 # check is module
                 module = get_module_from_line_number_with_file_structure(line, old_file_structure)
+                found_non_trivial_change = True
                 if module and not module in changes['edited_modules']:
                     changes['edited_modules'].append(module)
                 # elif not module and delete['content'].strip():
@@ -292,6 +376,8 @@ def extract_module_from_patch(instance, repo_dir, max_edit_file_num=1,
             for add in add_change:
                 # is_comment(line, new_comment_nodes) or \
                 line = add['line'] + offsets[i]
+                if is_import_statement(line, new_import_nodes):
+                    found_non_trivial_change = True
                 if is_import_statement(line, new_import_nodes) or \
                     add['content'].strip().startswith('#') or \
                     is_docstring(line, new_docstring_nodes):
@@ -300,6 +386,7 @@ def extract_module_from_patch(instance, repo_dir, max_edit_file_num=1,
                 # check is global var
                 variable = is_global_var(line, new_global_vars)
                 if variable:
+                    found_non_trivial_change = True
                     if not include_gvar: continue
                     if variable in old_global_vars and f'variable: {variable}' not in changes['edited_modules']:
                         changes['edited_modules'].append(f'variable: {variable}')
@@ -309,6 +396,7 @@ def extract_module_from_patch(instance, repo_dir, max_edit_file_num=1,
                 
                 # check is module
                 module = get_module_from_line_number_with_file_structure(line, new_file_structure)
+                found_non_trivial_change = True
                 if module and \
                     module not in changes['edited_modules'] and \
                     module not in changes['added_modules']:
@@ -328,14 +416,16 @@ def extract_module_from_patch(instance, repo_dir, max_edit_file_num=1,
                     continue
                 if mode in ['added_modules', 'edited_modules']:
                     _mode = mode.replace('_modules', '_entities')
-                    _changes[_mode].append(f'{file}:{c.split(':')[-1].strip()}')
+                    # only append if the entity c does not begin with "class:"
+                    if not c.startswith("class:"):
+                        _changes[_mode].append(f'{file}:{c.split(':')[-1].strip()}')
                 
                 if c.startswith("function:") and '.' in c:
                     _c = c.split(':')[-1].strip().split('.')[0]  # class name
                     class_entry = f'{file}:{_c.strip()}'
                     # Check if class existed in old file - if so, it's edited, not added
                     class_existed = any(cls['name'] == _c.strip() for cls in old_file_structure['classes'])
-                    if class_existed:
+                    if class_existed or mode == "edited_modules":
                         if class_entry not in _changes['edited_modules']:
                             _changes['edited_modules'].append(class_entry)
                     else:
@@ -344,6 +434,10 @@ def extract_module_from_patch(instance, repo_dir, max_edit_file_num=1,
                 else:
                     if f'{file}:{c.split(':')[-1].strip()}' not in _changes[mode]:
                         _changes[mode].append(f'{file}:{c.split(':')[-1].strip()}')
+        
+        # Ignore files with zero non-trivial changes (for e.g. changes to only comments, docstrings, etc. must be ignored)
+        if not found_non_trivial_change:
+            continue
         
         updated_file_changes.append({
             'file': file,
@@ -368,10 +462,14 @@ def generate_oracle_locations_for_dataset(dataset, split,
     if os.path.exists(output_file):
         processed_instances = [data['instance_id'] for data in load_jsonl(output_file)]
 
+    swe_smith = True if dataset == "SWE-bench/SWE-smith-py" else False
+    ignore_pr_with_file_add_remove = False if dataset in ["princeton-nlp/SWE-bench_Lite", "princeton-nlp/SWE-bench_Verified"] else True
+
     error_list, empty_edit_list = [], []
     for instance in tqdm(bench_data):
         if instance['instance_id'] in processed_instances:
             continue
+        # selected_list = ["139bercy__pypel-78"]
         if selected_list and instance['instance_id'] not in selected_list:
             continue
         
@@ -382,10 +480,11 @@ def generate_oracle_locations_for_dataset(dataset, split,
             repo_dir = setup_repo(instance_data=instance, repo_base_dir=repo_base_dir,
                                 dataset=dataset, split=split)
         
-            file_changes = extract_module_from_patch(instance, repo_dir, max_edit_file_num)
+            file_changes = extract_module_from_patch(instance, repo_dir, max_edit_file_num, swe_smith=swe_smith, ignore_pr_with_file_add_remove=ignore_pr_with_file_add_remove)
             if not file_changes:
                 empty_edit_list.append(instance['instance_id'])
-                # continue
+                if split == 'train' or "rebench" in dataset:
+                    continue
             # else:
             #     for fchange in file_changes:
             #         if not fchange['changes']: # or \
@@ -397,12 +496,12 @@ def generate_oracle_locations_for_dataset(dataset, split,
                     'instance_id': instance['instance_id'],
                     'file_changes': file_changes,
                     'repo': instance['repo'],
-                    'base_commit': instance['base_commit'],
+                    'base_commit': instance.get('base_commit', None),
                     'problem_statement': instance['problem_statement'],
                     'patch': instance['patch']
                 }, output_file)
-        except FileNotFoundError as e:
-            logging.info(e)
+        except Exception as e:
+            print(str(e))
             error_list.append(instance['instance_id'])
             # break
     print(empty_edit_list)
@@ -540,22 +639,27 @@ if __name__ == "__main__":
     #                                    max_edit_file_num=args.max_edit_file_num)
     # print(result)
     
-    
-    if args.dataset == 'princeton-nlp/SWE-bench_Lite' and args.split == 'test':
-        generate_oracle_locations_for_dataset(args.dataset, args.split, 
-                                              args.output_dir, args.repo_base_dir, None, args.max_edit_file_num)
-    elif args.dataset == 'princeton-nlp/SWE-bench' and args.split == 'train':
-        with open(args.selected_list_file, 'r') as f:
-            selected_list = json.loads(f.read())
-        generate_oracle_locations_for_dataset(args.dataset, args.split, 
-                                              args.output_dir, args.repo_base_dir, 
-                                              selected_list, args.max_edit_file_num)
-    elif args.dataset == "SWE-Gym/SWE-Gym":
-        generate_oracle_locations_for_dataset(args.dataset, args.split, 
-                                              args.output_dir, args.repo_base_dir, None, args.max_edit_file_num)
+    supported_datasets = ["princeton-nlp/SWE-bench_Lite", "princeton-nlp/SWE-bench_Verified", "SWE-Gym/SWE-Gym", "SWE-bench/SWE-smith-py", "nebius/SWE-rebench"]
+    assert args.dataset in supported_datasets, f"Dataset {args.dataset} not supported. Supported datasets: {supported_datasets}"
+
+    generate_oracle_locations_for_dataset(args.dataset, args.split, args.output_dir, args.repo_base_dir, None, args.max_edit_file_num)
+
+
+    # if args.dataset == 'princeton-nlp/SWE-bench_Lite' and args.split == 'test':
+    #     generate_oracle_locations_for_dataset(args.dataset, args.split, 
+    #                                           args.output_dir, args.repo_base_dir, None, args.max_edit_file_num)
+    # elif args.dataset == 'princeton-nlp/SWE-bench' and args.split == 'train':
+    #     with open(args.selected_list_file, 'r') as f:
+    #         selected_list = json.loads(f.read())
+    #     generate_oracle_locations_for_dataset(args.dataset, args.split, 
+    #                                           args.output_dir, args.repo_base_dir, 
+    #                                           selected_list, args.max_edit_file_num)
+    # elif args.dataset == "SWE-Gym/SWE-Gym":
+    #     generate_oracle_locations_for_dataset(args.dataset, args.split, 
+    #                                           args.output_dir, args.repo_base_dir, None, args.max_edit_file_num)
 
         
-    if args.loc_bench:
-        generate_oracle_locations_for_data_file(args.dataset, args.gen_n_limit,
-                                              args.max_edit_file_num, 
-                                              args.repo_base_dir, args.num_processes)
+    # if args.loc_bench:
+    #     generate_oracle_locations_for_data_file(args.dataset, args.gen_n_limit,
+    #                                           args.max_edit_file_num, 
+    #                                           args.repo_base_dir, args.num_processes)

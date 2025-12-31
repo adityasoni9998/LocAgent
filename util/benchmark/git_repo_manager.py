@@ -18,7 +18,10 @@ def setup_github_repo(repo: str, base_commit: str, base_dir: str = "/tmp/repos")
         os.makedirs(path)
         logger.info(f"Directory '{path}' was created.")
     maybe_clone(repo_url, path)
-    checkout_commit(path, base_commit)
+    if base_commit is not None:
+        checkout_commit(path, base_commit)
+    else:
+        clean_and_reset_state(path)
     return path
 
 

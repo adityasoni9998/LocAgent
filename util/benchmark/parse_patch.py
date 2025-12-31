@@ -8,14 +8,23 @@ import json
 from collections import defaultdict
 
 
-def get_oracle_filenames(patch):
+def get_oracle_filenames(patch, ignore_pr_with_file_add_remove=True):
     """
     Returns the filenames that are changed in the patch
     """
-    source_files = {
-        patch_file.source_file.split("a/", 1)[-1]
-        for patch_file in unidiff.PatchSet(patch)
-    }
+    # NOTE: ignore all PRs that added or removed files from the patch
+    ignore_pr = False
+    source_files = []
+    for patch_file in unidiff.PatchSet(patch):
+        # if patch_file.is_added_file or patch_file.is_removed_file:
+        #     ignore_pr = True
+        #     break
+        file_path = patch_file.source_file.split("a/", 1)[-1]
+        if file_path != "/dev/null":
+            source_files.append(file_path)
+
+    # if ignore_pr:
+    #     return set()
     gold_docs = set()
     for source_file in source_files:
         gold_docs.add(source_file)
@@ -163,13 +172,28 @@ def parse_patch(patch, ignore_import=True):
     """
     parsed_patches = []
     patch_set = unidiff.PatchSet(patch)
-    
     # Iterate over each file in the patch set
     for patched_file in patch_set:
-        if not str(patched_file.path).endswith('.py'):
+        # NOTE: we ignore files newly added by the patch
+        if patched_file.is_added_file:
             continue
+        source_file = patched_file.source_file
+        if source_file.startswith('a/') or source_file.startswith('b/'):
+            source_file = source_file[2:]
+        target_file = patched_file.target_file
+        if target_file.startswith('a/') or target_file.startswith('b/'):
+            target_file = target_file[2:]
+
+        # NOTE: for renamed files, we push the hunks to the old filename
+        # There are only 2 cases possible: file is renamed or an existing file is edited. Instances with file removal and addition are already ignored
+        filename = source_file
+
+        # NOTE: ignore all changes to non-python files
+        if not filename.endswith('.py'):
+            continue
+
         parsed_file_patch = dict()
-        parsed_file_patch['file'] = patched_file.path
+        parsed_file_patch['file'] = [source_file, target_file]
         parsed_file_patch['hunks'] = []
         
         # Iterate over each hunk (a block of changes) in the file

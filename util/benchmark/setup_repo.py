@@ -44,7 +44,7 @@ def setup_repo(
         github_repo_path = instance_data["repo"]
     return setup_github_repo(
         repo=github_repo_path,
-        base_commit=instance_data["base_commit"],
+        base_commit=instance_data.get("base_commit", None),
         base_dir=repo_base_dir,
     )
 

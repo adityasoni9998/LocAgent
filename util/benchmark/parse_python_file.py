@@ -9,8 +9,11 @@ import logging
 
 def parse_class_docstrings(target_file: str) -> list:
     """Parse docstrings from classes AND functions/methods."""
-    with open(target_file, 'r') as f:
-        source_code = f.read()
+    try:
+        with open(target_file, 'r') as f:
+            source_code = f.read()
+    except Exception as e:
+        return []
         
     # Parse the code string
     try:
@@ -69,8 +72,11 @@ def parse_class_docstrings(target_file: str) -> list:
 
 
 def parse_import_nodes(target_file):
-    with open(target_file, 'r') as f:
-        source_code = f.read()
+    try:
+        with open(target_file, 'r') as f:
+            source_code = f.read()
+    except Exception as e:
+        return []
 
     # Parse the source code
     tree = ast.parse(source_code)
@@ -107,8 +113,11 @@ def parse_import_nodes(target_file):
 
 def parse_comment_nodes(target_file):
     comment_nodes = []
-    with open(target_file, 'r') as f:
-        source_code = f.read()
+    try:
+        with open(target_file, 'r') as f:
+            source_code = f.read()
+    except Exception as e:
+        return []
     # Tokenize the source code to find comments and their locations
     source = StringIO(source_code)
     tokens = tokenize.generate_tokens(source.readline)
@@ -213,10 +222,13 @@ def parse_global_var_from_code(file_content: str) -> dict[str, dict]:
 
 
 def parse_global_var_from_file(file_path):
-    with open(file_path, 'r') as f:
-        file_content = f.read()
-    global_vars = parse_global_var_from_code(file_content)
-    return global_vars
+    try:
+        with open(file_path, 'r') as f:
+            file_content = f.read()
+        global_vars = parse_global_var_from_code(file_content)
+        return global_vars
+    except Exception as _:
+        return {}
 
 
 def is_global_var(line, global_vars):
@@ -237,8 +249,8 @@ def parse_python_file(file_path, file_content=None):
                 file_content = file.read()
                 parsed_data = ast.parse(file_content)
         except Exception as e:  # Catch all types of exceptions
-            print(f"Error in file {file_path}: {e}")
-            return [], [], ""
+            print(f"CRITICAL ERROR: Error in reading file {file_path}: {e}")
+            return [], [], None
     else:
         try:
             parsed_data = ast.parse(file_content)

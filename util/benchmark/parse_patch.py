@@ -13,18 +13,18 @@ def get_oracle_filenames(patch, ignore_pr_with_file_add_remove=True):
     Returns the filenames that are changed in the patch
     """
     # NOTE: ignore all PRs that added or removed files from the patch
-    ignore_pr = False
+    ignore_pr = ignore_pr_with_file_add_remove
     source_files = []
     for patch_file in unidiff.PatchSet(patch):
-        # if patch_file.is_added_file or patch_file.is_removed_file:
-        #     ignore_pr = True
-        #     break
+        if patch_file.is_added_file or patch_file.is_removed_file:
+            ignore_pr = True
+            break
         file_path = patch_file.source_file.split("a/", 1)[-1]
         if file_path != "/dev/null":
             source_files.append(file_path)
 
-    # if ignore_pr:
-    #     return set()
+    if ignore_pr:
+        return set()
     gold_docs = set()
     for source_file in source_files:
         gold_docs.add(source_file)
